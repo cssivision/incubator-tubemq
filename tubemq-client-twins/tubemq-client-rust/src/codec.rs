@@ -20,21 +20,29 @@ use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 const PACKET_HEAD_LEN: usize = 12;
+const PACKET_BUFFER_LEN: usize = 4;
 
 #[derive(Debug)]
 pub struct Codec {
     state: DecodeState,
+    body: PacketBody,
 }
 
 impl Default for Codec {
     fn default() -> Self {
         Codec {
             state: DecodeState::Head,
+            body: PacketBody {
+                state: 0,
+                size: 0,
+                list_size: 0,
+                body: BytesMut::new(),
+            },
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum DecodeState {
     Head,
     Data(PacketHead),
@@ -47,8 +55,12 @@ struct PacketHead {
     list_size: u32,
 }
 
+#[derive(Debug)]
 struct PacketBody {
     body: BytesMut,
+    state: usize,
+    size: u32,
+    list_size: u32,
 }
 
 #[derive(Debug)]
@@ -68,7 +80,7 @@ impl Decoder for PacketHeadCodec {
         let list_size = buf.get_u32();
 
         // Ensure that the buffer has enough space to read the list[0] length.
-        buf.reserve(4);
+        buf.reserve(PACKET_BUFFER_LEN);
 
         Ok(Some(PacketHead {
             token,
@@ -78,26 +90,51 @@ impl Decoder for PacketHeadCodec {
     }
 }
 
+#[derive(Debug)]
 pub struct Request {
-    head: PacketBody,
-    body: PacketBody,
+    head: PacketHead,
+    body: BytesMut,
 }
 
 impl Codec {
     fn decode_data(
-        &self,
-        head: &mut PacketHead,
+        &mut self,
+        head: &PacketHead,
         buf: &mut BytesMut,
-    ) -> io::Result<Option<PacketBody>> {
-        if buf.len() < 4 {
-            return Ok(None);
+    ) -> io::Result<Option<BytesMut>> {
+        if self.body.list_size == 0 {
+            let n = self.body.body.len();
+            return Ok(Some(self.body.body.split_to(n)));
         }
 
-        buf.advance(4);
+        if self.body.state == 0 {
+            if buf.len() < PACKET_BUFFER_LEN {
+                return Ok(None);
+            }
+            self.body.size = buf.get_u32();
+            self.body.state = 1;
+            buf.reserve(self.body.size as usize);
+        }
 
-        let body = buf.split_to(0);
+        if self.body.state == 1 {
+            if buf.len() < self.body.size as usize {
+                return Ok(None);
+            }
 
-        Ok(Some(Request { body }))
+            let data = buf.split_to(self.body.state);
+            self.body.body.extend_from_slice(&data);
+            self.body.state = 0;
+            self.body.size = 0;
+            buf.reserve(PACKET_BUFFER_LEN);
+            self.body.list_size -= 1;
+        }
+
+        if head.list_size == 0 {
+            let n = self.body.body.len();
+            return Ok(Some(self.body.body.split_to(n)));
+        }
+
+        Ok(None)
     }
 }
 
@@ -105,29 +142,27 @@ impl Decoder for Codec {
     type Item = Request;
     type Error = io::Error;
 
-    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<TrpcRequest>> {
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<Request>> {
         let head = match self.state {
             DecodeState::Head => match PacketHeadCodec.decode(buf)? {
                 Some(v) => {
-                    self.state = DecodeState::Data(v);
+                    self.state = DecodeState::Data(v.clone());
+                    self.body.list_size = v.list_size;
                     v
                 }
                 None => return Ok(None),
             },
-            DecodeState::Data(v) => v,
+            DecodeState::Data(ref v) => v.clone(),
         };
 
         match self.decode_data(&head, buf)? {
-            Some(packet) => {
+            Some(body) => {
                 // Update the decode state
                 self.state = DecodeState::Head;
 
                 // Make sure the buffer has enough space to read the next head
                 buf.reserve(PACKET_HEAD_LEN);
-                Ok(Some(Request {
-                    head,
-                    body: packet.packet_body,
-                }))
+                Ok(Some(Request { head, body }))
             }
             None => Ok(None),
         }
