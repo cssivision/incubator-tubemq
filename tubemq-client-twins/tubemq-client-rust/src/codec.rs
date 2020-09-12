@@ -33,7 +33,7 @@ impl Default for Codec {
         Codec {
             state: DecodeState::Head,
             body: PacketBody {
-                state: 0,
+                state: DecodeListSize::Head,
                 size: 0,
                 list_size: 0,
                 body: BytesMut::new(),
@@ -55,10 +55,16 @@ struct PacketHead {
     list_size: u32,
 }
 
+#[derive(Debug, Clone)]
+enum DecodeListSize {
+    Head,
+    Data,
+}
+
 #[derive(Debug)]
 struct PacketBody {
     body: BytesMut,
-    state: usize,
+    state: DecodeListSize,
     size: u32,
     list_size: u32,
 }
@@ -107,26 +113,30 @@ impl Codec {
             return Ok(Some(self.body.body.split_to(n)));
         }
 
-        if self.body.state == 0 {
-            if buf.len() < PACKET_BUFFER_LEN {
-                return Ok(None);
-            }
-            self.body.size = buf.get_u32();
-            self.body.state = 1;
-            buf.reserve(self.body.size as usize);
-        }
+        match self.body.state {
+            DecodeListSize::Head => {
+                if buf.len() < PACKET_BUFFER_LEN {
+                    return Ok(None);
+                }
 
-        if self.body.state == 1 {
-            if buf.len() < self.body.size as usize {
-                return Ok(None);
-            }
+                self.body.size = buf.get_u32();
+                self.body.state = DecodeListSize::Data;
 
-            let data = buf.split_to(self.body.state);
-            self.body.body.extend_from_slice(&data);
-            self.body.state = 0;
-            self.body.size = 0;
-            buf.reserve(PACKET_BUFFER_LEN);
-            self.body.list_size -= 1;
+                buf.reserve(self.body.size as usize);
+            }
+            DecodeListSize::Data => {
+                if buf.len() < self.body.size as usize {
+                    return Ok(None);
+                }
+
+                let data = buf.split_to(self.body.size as usize);
+                self.body.body.extend_from_slice(&data);
+                self.body.size = 0;
+                self.body.state = DecodeListSize::Head;
+                self.body.list_size -= 1;
+
+                buf.reserve(PACKET_BUFFER_LEN);
+            }
         }
 
         if head.list_size == 0 {
