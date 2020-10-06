@@ -61,7 +61,13 @@ enum DecodeListSize {
     Data,
 }
 
-#[derive(Debug)]
+impl Default for DecodeListSize {
+    fn default() -> Self {
+        DecodeListSize::Head
+    }
+}
+
+#[derive(Debug, Default)]
 struct PacketBody {
     body: BytesMut,
     state: DecodeListSize,
@@ -169,6 +175,7 @@ impl Decoder for Codec {
             Some(body) => {
                 // Update the decode state
                 self.state = DecodeState::Head;
+                self.body = PacketBody::default();
 
                 // Make sure the buffer has enough space to read the next head
                 buf.reserve(PACKET_HEAD_LEN);

@@ -9,3 +9,10 @@ license = "Apache-2.0"
 tokio = { version = "0.2", features = ["full"] }
 tokio-util = { version = "0.3", features = ["codec"]  }
 bytes = "0.5"
+prost = "0.6"
+
+[build-dependencies] 
+prost-build = { version = "0.6", optional = true }
+
+[features]
+bindgen = ["prost-build"]
